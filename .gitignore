@@ -1,0 +1,4 @@
+build/
+.gradle/
+app/src/main/assets/esp32c3.json
+local.properties

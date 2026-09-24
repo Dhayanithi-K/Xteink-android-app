@@ -1,6 +1,8 @@
 package dev.x4flasher
 
+import android.util.Base64
 import com.hoho.android.usbserial.driver.UsbSerialPort
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -36,6 +38,10 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     private companion object {
         const val CMD_FLASH_BEGIN = 0x02
+        const val CMD_MEM_BEGIN = 0x05
+        const val CMD_MEM_END = 0x06
+        const val CMD_MEM_DATA = 0x07
+        const val CMD_READ_FLASH = 0xD2
         const val CMD_FLASH_DATA = 0x03
         const val CMD_FLASH_END = 0x04
         const val CMD_SYNC = 0x08
@@ -84,12 +90,10 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         }
     }
 
-    private fun send(cmd: Int, data: ByteArray, chk: Int) {
-        val pkt = ByteBuffer.allocate(8 + data.size).order(ByteOrder.LITTLE_ENDIAN)
-        pkt.put(0.toByte()).put(cmd.toByte()).putShort(data.size.toShort()).putInt(chk).put(data)
+    private fun slip(payload: ByteArray): ByteArray {
         val out = ByteArrayOutputStream()
         out.write(0xC0)
-        for (b in pkt.array()) {
+        for (b in payload) {
             when (b.toInt() and 0xFF) {
                 0xC0 -> { out.write(0xDB); out.write(0xDC) }
                 0xDB -> { out.write(0xDB); out.write(0xDD) }
@@ -97,7 +101,13 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             }
         }
         out.write(0xC0)
-        port.write(out.toByteArray(), 5000)
+        return out.toByteArray()
+    }
+
+    private fun send(cmd: Int, data: ByteArray, chk: Int) {
+        val pkt = ByteBuffer.allocate(8 + data.size).order(ByteOrder.LITTLE_ENDIAN)
+        pkt.put(0.toByte()).put(cmd.toByte()).putShort(data.size.toShort()).putInt(chk).put(data)
+        port.write(slip(pkt.array()), 5000)
     }
 
     private fun command(cmd: Int, data: ByteArray = ByteArray(0), chk: Int = 0, timeoutMs: Long = 3000): Resp {
@@ -213,6 +223,52 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     fun finish() {
         try { expectOk(CMD_FLASH_END, le(1)) } catch (_: EspError) { }
+    }
+
+    // ---- Stub loader (RAM) : used only for reading flash ---------------------
+
+    private fun ramUpload(data: ByteArray, addr: Int) {
+        val block = 0x1800
+        val n = (data.size + block - 1) / block
+        expectOk(CMD_MEM_BEGIN, le(data.size, n, block, addr))
+        for (seq in 0 until n) {
+            val chunk = data.copyOfRange(seq * block, minOf(data.size, (seq + 1) * block))
+            var x = 0xEF
+            for (b in chunk) x = x xor (b.toInt() and 0xFF)
+            expectOk(CMD_MEM_DATA, le(chunk.size, seq, 0, 0) + chunk, x)
+        }
+    }
+
+    /** Upload and start esptool's flasher stub (JSON with base64 text/data). */
+    fun loadStub(json: String) {
+        val o = JSONObject(json)
+        val entry = o.getLong("entry").toInt()
+        ramUpload(Base64.decode(o.getString("text"), Base64.DEFAULT), o.getLong("text_start").toInt())
+        if (o.has("data")) {
+            val d = Base64.decode(o.getString("data"), Base64.DEFAULT)
+            if (d.isNotEmpty()) ramUpload(d, o.getLong("data_start").toInt())
+        }
+        expectOk(CMD_MEM_END, le(0, entry))
+        val f = nextFrame(System.currentTimeMillis() + 3000)
+        if (f == null || String(f, Charsets.US_ASCII) != "OHAI") throw EspError("Stub did not start (no OHAI).")
+        log("Stub running.")
+    }
+
+    /** Stub-only. Streams flash contents to [sink] in blocks, verifies the stub's MD5 of the stream. */
+    fun readFlash(offset: Int, length: Int, sink: (ByteArray) -> Unit, onProgress: (Float) -> Unit) {
+        expectOk(CMD_READ_FLASH, le(offset, length, 0x1000, 64), 0, 5000)
+        val md = MessageDigest.getInstance("MD5")
+        var got = 0
+        while (got < length) {
+            val f = nextFrame(System.currentTimeMillis() + 10_000)
+                ?: throw EspError("Timeout reading flash at 0x%X".format(offset + got))
+            sink(f); md.update(f); got += f.size
+            port.write(slip(le(got)), 5000)
+            if ((got / 0x1000) % 16 == 0) onProgress(got / length.toFloat())
+        }
+        onProgress(1f)
+        val digest = nextFrame(System.currentTimeMillis() + 10_000) ?: throw EspError("No MD5 from stub.")
+        if (!md.digest().contentEquals(digest)) throw EspError("Read MD5 mismatch. Try again.")
     }
 
     fun hardReset() {

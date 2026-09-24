@@ -11,6 +11,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Fetch ESP32-C3 stub
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fsSL -o app/src/main/assets/esp32c3.json \
+            https://github.com/espressif/esptool-legacy-flasher-stub/releases/download/v1.11.1/esp32c3.json
+          echo "67e45f7ae1cb7f2107f1573e2f5d1e31c490914a6f4c2d841119189d8f379990  app/src/main/assets/esp32c3.json" | sha256sum -c -
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
