@@ -95,9 +95,15 @@ private fun stubJson(ctx: Context): String = try {
 
 /** Flash `image` into app0 and blank otadata so the bootloader boots it. */
 private suspend fun runFlash(
-    ctx: Context, image: ByteArray, preflight: Boolean, log: (String) -> Unit, onProgress: (Float) -> Unit
+    ctx: Context, image: ByteArray, preflight: Boolean, inactive: Boolean,
+    log: (String) -> Unit, onProgress: (Float) -> Unit
 ) {
     ImageCheck.validate(image)?.let { throw EspError(it) }
+    if (inactive) {
+        val stub = stubJson(ctx)
+        withLoader(ctx, log) { loader -> DeviceOps.flashInactive(loader, stub, image, log, onProgress) }
+        return
+    }
     val stub = if (preflight) stubJson(ctx) else null
     withLoader(ctx, log) { loader ->
         if (stub != null) {
@@ -141,6 +147,7 @@ fun FlasherScreen() {
     var image by remember { mutableStateOf<ByteArray?>(null) }
     var fileName by remember { mutableStateOf("") }
     var preflight by remember { mutableStateOf(true) }
+    var inactive by remember { mutableStateOf(false) }
     var confirmAction by remember { mutableStateOf<String?>(null) } // "flash" | "swap"
 
     fun log(s: String) { scope.launch(Dispatchers.Main) { logLines.add(s) } }
@@ -189,8 +196,12 @@ fun FlasherScreen() {
         Button(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose firmware .bin") }
         if (fileName.isNotEmpty()) Text(fileName, style = MaterialTheme.typography.bodyMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = preflight, onCheckedChange = { preflight = it }, enabled = !busy)
+            Checkbox(checked = preflight || inactive, onCheckedChange = { preflight = it }, enabled = !busy && !inactive)
             Text("Check partition table before flashing", style = MaterialTheme.typography.bodyMedium)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = inactive, onCheckedChange = { inactive = it }, enabled = !busy)
+            Text("Flash into the inactive slot (keep current firmware as fallback)", style = MaterialTheme.typography.bodyMedium)
         }
         Button(onClick = { confirmAction = "flash" }, enabled = !busy && image != null) { Text("Flash to X4") }
 
@@ -223,7 +234,8 @@ fun FlasherScreen() {
             title = { Text(if (action == "flash") "Flash to X4?" else "Switch boot slot?") },
             text = {
                 Text(
-                    if (action == "flash") "Overwrites the app0 slot and resets the boot selector. Don't unplug until it says Done."
+                    if (action == "flash" && inactive) "Writes the firmware into the slot that is NOT running, then boots it. The current firmware stays in the other slot. Don't unplug until it says Done."
+                    else if (action == "flash") "Overwrites the app0 slot and resets the boot selector. Don't unplug until it says Done."
                     else "Points the bootloader at the other firmware slot, if it holds a valid app. Don't unplug until it says Done."
                 )
             },
@@ -233,7 +245,7 @@ fun FlasherScreen() {
                     confirmAction = null
                     task {
                         if (action == "flash") {
-                            runFlash(ctx, image!!, preflight, { s -> log(s) }) { p -> setProgress(p) }
+                            runFlash(ctx, image!!, preflight, inactive, { s -> log(s) }) { p -> setProgress(p) }
                         } else {
                             val stub = stubJson(ctx)
                             withLoader(ctx, { s -> log(s) }) { loader ->

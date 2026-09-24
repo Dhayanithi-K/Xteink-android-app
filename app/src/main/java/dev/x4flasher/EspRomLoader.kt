@@ -188,7 +188,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         port.setRTS(false); port.setDTR(false)
         val end = System.currentTimeMillis() + 400   // swallow boot-log noise
         while (System.currentTimeMillis() < end) pump(50)
-        frames.clear()
+        frames.clear(); cur.reset(); inFrame = false; esc = false
     }
 
     fun sync() {
@@ -287,7 +287,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     /** Stub-only. Streams flash contents to [sink] in blocks, verifies the stub's MD5 of the stream. */
     fun readFlash(offset: Int, length: Int, sink: (ByteArray) -> Unit, onProgress: (Float) -> Unit) {
-        expectOk(CMD_READ_FLASH, le(offset, length, 0x1000, 64), 0, 5000)
+        expectOk(CMD_READ_FLASH, le(offset, length, 0x1000, 1), 0, 5000)   // 1 block in flight: lock-step
         val md = MessageDigest.getInstance("MD5")
         var got = 0
         while (got < length) {
