@@ -1,19 +1,21 @@
 # X4 Flasher (Android)
 
-Flashes an app image (e.g. CrossPoint `firmware.bin`) onto an Xteink X4 from an Android phone
-over USB-C OTG. ROM-bootloader only, no stub, no PC.
+Flashes an app image (e.g. CrossPoint firmware.bin) onto an Xteink X4 from an Android phone
+over USB-C OTG. No PC.
 
-What it does: reset into download mode -> SYNC -> confirm ESP32-C3 -> write image to app0 (0x10000)
--> MD5 verify -> blank otadata (bootloader then boots app0) -> reset.
+## Buttons
+- **Flash to X4**: image -> app0 (0x10000), MD5 verify, blank otadata, reset.
+  Optional pre-check reads the partition table via the stub and refuses non-standard layouts.
+- **Inspect**: read-only. Prints partition table, otadata state, which slot boots, whether each slot holds an app.
+- **Back up flash**: dumps all 16 MB (MD5 checked) to a file you choose. Restore later with the PC web flasher.
+- **Swap slot**: points otadata at the other OTA slot (only if it holds a valid app).
 
-Refuses: non-ESP32-C3 images, images without an app descriptor, images > 0x640000 bytes.
+## How it works
+ROM bootloader for all writes (proven path). The esptool flasher stub (v1.11.1, downloaded and
+SHA-256-checked by the workflow, not stored in the repo) is used only for reading flash.
 
-## Build without a PC
-Push this folder to a GitHub repo. The workflow in .github/workflows/build.yml builds a debug APK
-(Actions -> latest run -> Artifacts). Install it on the phone.
+## Build
+Push to GitHub; Actions builds a debug APK (Actions -> run -> Artifacts).
 
-## Not done yet
-- Backup of stock firmware (ROM loader can't read flash; needs the esptool stub loader)
-- Partition-table check before writing
-- X3 / X4 Pro (different layouts; deliberately unsupported)
-- Untested on hardware
+## Not done
+X3 / X4 Pro (different layouts), stub-based fast writes, restoring a backup from the app.

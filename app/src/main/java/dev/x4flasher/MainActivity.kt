@@ -80,7 +80,8 @@ private suspend fun <T> withLoader(ctx: Context, log: (String) -> Unit, block: (
         port.open(conn)
         try {
             port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            block(EspRomLoader(port, log))
+            val loader = EspRomLoader(port, log)
+            try { block(loader) } finally { loader.close() }
         } finally {
             runCatching { port.close() }
         }

@@ -63,12 +63,38 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
     private val cur = ByteArrayOutputStream()
     private var inFrame = false
     private var esc = false
-    private val rx = ByteArray(4096)
+    // Reads must NOT use short timeouts: Android's bulkTransfer drops bytes when a timed
+    // read expires mid-stream (documented in usb-serial-for-android). So one thread does
+    // blocking reads (timeout 0) and hands chunks to us through a queue.
+    private val chunks = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+    @Volatile private var running = true
+    @Volatile private var readError: Exception? = null
+
+    init {
+        Thread {
+            val buf = ByteArray(4096)
+            try {
+                while (running) {
+                    val n = port.read(buf, 0)
+                    if (n > 0) chunks.put(buf.copyOf(n))
+                }
+            } catch (e: Exception) {
+                if (running) readError = e
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    /** Stop the reader thread. Call before closing the port. */
+    fun close() { running = false }
 
     private fun pump(timeoutMs: Int) {
-        val n = port.read(rx, timeoutMs)
-        for (i in 0 until n) {
-            val b = rx[i].toInt() and 0xFF
+        val chunk = chunks.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        if (chunk == null) {
+            readError?.let { throw EspError("USB read failed: ${it.message}") }
+            return
+        }
+        for (v in chunk) {
+            val b = v.toInt() and 0xFF
             if (b == 0xC0) {
                 if (inFrame && cur.size() > 0) frames.addLast(cur.toByteArray())
                 cur.reset(); inFrame = true; esc = false
@@ -249,8 +275,13 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             if (d.isNotEmpty()) ramUpload(d, o.getLong("data_start").toInt())
         }
         expectOk(CMD_MEM_END, le(0, entry))
-        val f = nextFrame(System.currentTimeMillis() + 3000)
-        if (f == null || String(f, Charsets.US_ASCII) != "OHAI") throw EspError("Stub did not start (no OHAI).")
+        val deadline = System.currentTimeMillis() + 5000
+        var started = false
+        while (!started) {
+            val f = nextFrame(deadline) ?: break
+            started = String(f, Charsets.US_ASCII) == "OHAI"
+        }
+        if (!started) throw EspError("Stub did not start (no OHAI). Retry.")
         log("Stub running.")
     }
 
@@ -262,6 +293,9 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         while (got < length) {
             val f = nextFrame(System.currentTimeMillis() + 10_000)
                 ?: throw EspError("Timeout reading flash at 0x%X".format(offset + got))
+            val expected = minOf(0x1000, length - got)
+            if (f.size != expected)
+                throw EspError("Short block (%d of %d bytes) at 0x%X. Retry.".format(f.size, expected, offset + got))
             sink(f); md.update(f); got += f.size
             port.write(slip(le(got)), 5000)
             if ((got / 0x1000) % 16 == 0) onProgress(got / length.toFloat())
