@@ -18,12 +18,15 @@ Push this folder to a GitHub repo. The workflow in .github/workflows/build.yml b
 - Partition-table check before writing
 - X3 / X4 Pro (different layouts; deliberately unsupported)
 - Untested on hardware
+
 ## How to use?
 - Download the apk from [Release](https://github.com/Dhayanithi-K/Xteink-android-app/releases)
 -  section and install on your android device.
-- Connect your xteink x4 device to your android using usb C to C cable
+- Connect your xteink x4 device to your android using usb C to C cable and make sure the xteink x4 is not sleeping.
 - Download the desired firmware.bin file (eg: crosspoint/ inky / Witch(hunt) Reader - basically whichever you like in your android device
 - open the app and select the firmware and wait for it to verify it.
 - click Flash to X4.
 - wait for the xteink x4 device to reboot
 - Done
+## Screenshot
+<img width="1080" height="2400" alt="1000118342" src="https://github.com/user-attachments/assets/1fe17fc7-44d4-479b-a4bb-9fa0d1efe699" />
