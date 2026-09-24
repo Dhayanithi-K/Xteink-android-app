@@ -130,7 +130,8 @@ fun FlasherScreen() {
                 ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }
             fileName = displayName(ctx, uri)
-            val err = bytes?.let { ImageCheck.validate(it) } ?: "Could not read file."
+            /*val err = bytes?.let { ImageCheck.validate(it) } ?: "Could not read file."*/
+            val err = if (bytes == null) "Could not read file." else ImageCheck.validate(bytes)
             if (err != null) { image = null; log("Rejected $fileName: $err") }
             else { image = bytes; log("Loaded $fileName (${bytes!!.size / 1024} KB).") }
         }
