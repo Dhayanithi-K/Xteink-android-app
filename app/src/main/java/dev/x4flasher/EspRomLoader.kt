@@ -69,6 +69,9 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
     private val chunks = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
     @Volatile private var running = true
     @Volatile private var readError: Exception? = null
+    @Volatile var rawBytesTotal = 0L
+    @Volatile var frameBytesTotal = 0L
+    @Volatile var c0Total = 0L
 
     init {
         Thread {
@@ -93,10 +96,12 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             readError?.let { throw EspError("USB read failed: ${it.message}") }
             return
         }
+        rawBytesTotal += chunk.size
         for (v in chunk) {
             val b = v.toInt() and 0xFF
             if (b == 0xC0) {
-                if (inFrame && cur.size() > 0) frames.addLast(cur.toByteArray())
+                c0Total++
+                if (inFrame && cur.size() > 0) { frames.addLast(cur.toByteArray()); frameBytesTotal += cur.size() }
                 cur.reset(); inFrame = true; esc = false
             } else if (inFrame) {
                 if (esc) {
@@ -294,8 +299,28 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             val f = nextFrame(System.currentTimeMillis() + 10_000)
                 ?: throw EspError("Timeout reading flash at 0x%X".format(offset + got))
             val expected = minOf(0x1000, length - got)
-            if (f.size != expected)
+            if (f.size != expected) {
+                fun hex(b: ByteArray, n: Int) = b.take(n).joinToString(" ") { "%02x".format(it) }
+                log("DIAG short block: got ${f.size} of $expected at 0x%X".format(offset + got))
+                log("DIAG frame head: ${hex(f, minOf(16, f.size))}  tail: ${hex(f.reversed().toByteArray(), minOf(16, f.size)).let { it.split(" ").reversed().joinToString(" ") }}")
+                log("DIAG counters: rawBytes=$rawBytesTotal frameBytes=$frameBytesTotal c0=$c0Total")
+                var trailing = 0
+                var extra: ByteArray? = null
+                val peekDeadline = System.currentTimeMillis() + 300
+                while (true) {
+                    val nf = nextFrame(peekDeadline) ?: break
+                    trailing++
+                    if (extra == null) extra = nf
+                    log("DIAG trailing frame #$trailing size=${nf.size} head=${hex(nf, minOf(16, nf.size))}")
+                    if (trailing >= 3) break
+                }
+                if (extra != null && f.size + extra.size == expected) {
+                    log("DIAG: short frame + very next frame add up to $expected -> looks like a spurious frame-terminator (0xC0) mid-block, not real byte loss.")
+                } else if (trailing == 0) {
+                    log("DIAG: no data followed within 300ms -> looks like genuine byte loss on the USB link, not a split frame.")
+                }
                 throw EspError("Short block (%d of %d bytes) at 0x%X. Retry.".format(f.size, expected, offset + got))
+            }
             sink(f); md.update(f); got += f.size
             port.write(slip(le(got)), 5000)
             if ((got / 0x1000) % 16 == 0) onProgress(got / length.toFloat())
