@@ -51,6 +51,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         const val CMD_SPI_FLASH_MD5 = 0x13
 
         const val BLOCK = 0x400
+        const val READ_BLOCK = 0x200   // small on purpose; see readFlash()
         const val FLASH_TOTAL = 0x1000000
         const val CHIP_MAGIC_ADDR = 0x40001000
         val C3_MAGIC = setOf(0x6921506FL, 0x1B31506FL, 0x4881506FL, 0x4361506FL)
@@ -75,7 +76,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     init {
         Thread {
-            val buf = ByteArray(4096)
+            val buf = ByteArray(16384)
             try {
                 while (running) {
                     val n = port.read(buf, 0)
@@ -292,13 +293,14 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     /** Stub-only. Streams flash contents to [sink] in blocks, verifies the stub's MD5 of the stream. */
     fun readFlash(offset: Int, length: Int, sink: (ByteArray) -> Unit, onProgress: (Float) -> Unit) {
-        expectOk(CMD_READ_FLASH, le(offset, length, 0x1000, 1), 0, 5000)   // 1 block in flight: lock-step
+        val block = READ_BLOCK
+        expectOk(CMD_READ_FLASH, le(offset, length, block, 1), 0, 5000)   // small blocks, 1 in flight: lock-step
         val md = MessageDigest.getInstance("MD5")
         var got = 0
         while (got < length) {
             val f = nextFrame(System.currentTimeMillis() + 10_000)
                 ?: throw EspError("Timeout reading flash at 0x%X".format(offset + got))
-            val expected = minOf(0x1000, length - got)
+            val expected = minOf(block, length - got)
             if (f.size != expected) {
                 fun hex(b: ByteArray, n: Int) = b.take(n).joinToString(" ") { "%02x".format(it) }
                 log("DIAG short block: got ${f.size} of $expected at 0x%X".format(offset + got))
@@ -323,7 +325,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             }
             sink(f); md.update(f); got += f.size
             port.write(slip(le(got)), 5000)
-            if ((got / 0x1000) % 16 == 0) onProgress(got / length.toFloat())
+            if ((got / block) % 128 == 0) onProgress(got / length.toFloat())
         }
         onProgress(1f)
         val digest = nextFrame(System.currentTimeMillis() + 10_000) ?: throw EspError("No MD5 from stub.")
