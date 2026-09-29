@@ -1,5 +1,8 @@
 package dev.x4flasher
 
+import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbRequest
 import android.util.Base64
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import org.json.JSONObject
@@ -9,6 +12,66 @@ import java.nio.ByteOrder
 import java.security.MessageDigest
 
 class EspError(msg: String) : Exception(msg)
+
+/** Switches set from the UI. */
+object UsbOptions {
+    @Volatile var continuousReader = false
+}
+
+/**
+ * Keeps several bulk-IN requests queued at all times (like libusb on a PC), so the host never stops
+ * polling the X4 between packets. Must not be combined with UsbSerialPort.read().
+ */
+@Suppress("DEPRECATION")
+class ContinuousReader(
+    private val conn: UsbDeviceConnection,
+    private val ep: UsbEndpoint,
+    private val sink: (ByteArray) -> Unit,
+    private val onError: (Exception) -> Unit,
+) {
+    private companion object {
+        const val DEPTH = 4
+        const val SIZE = 4096
+    }
+
+    @Volatile private var running = true
+    private val requests = ArrayList<UsbRequest>()
+
+    fun start() {
+        repeat(DEPTH) {
+            val r = UsbRequest()
+            if (!r.initialize(conn, ep)) throw EspError("USB request init failed")
+            val buf = ByteBuffer.allocate(SIZE)
+            r.clientData = buf
+            requests.add(r)
+            if (!r.queue(buf, SIZE)) throw EspError("USB request queue failed")
+        }
+        Thread {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
+            try {
+                while (running) {
+                    val done = conn.requestWait() ?: break
+                    if (!running) break
+                    val buf = done.clientData as ByteBuffer
+                    val n = buf.position()
+                    if (n > 0) sink(buf.array().copyOf(n))
+                    buf.clear()
+                    if (!done.queue(buf, SIZE)) break
+                }
+                if (running) onError(EspError("USB reader stopped unexpectedly."))
+            } catch (e: Exception) {
+                if (running) onError(e)
+            } finally {
+                for (r in requests) runCatching { r.close() }
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    fun stop() {
+        running = false
+        for (r in requests) runCatching { r.cancel() }
+    }
+}
 
 /** Guards so we only ever write a sane ESP32-C3 *app* image into app0. */
 object ImageCheck {
@@ -34,7 +97,11 @@ object ImageCheck {
  * Minimal ESP ROM-bootloader client (no stub): sync, flash write, MD5 verify.
  * The ROM loader cannot read flash back; that needs the stub (future work).
  */
-class EspRomLoader(private val port: UsbSerialPort, private val log: (String) -> Unit) {
+class EspRomLoader(
+    private val port: UsbSerialPort,
+    private val log: (String) -> Unit,
+    private val cont: Pair<UsbDeviceConnection, UsbEndpoint>? = null,
+) {
 
     private companion object {
         const val CMD_FLASH_BEGIN = 0x02
@@ -74,8 +141,28 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
     @Volatile var frameBytesTotal = 0L
     @Volatile var c0Total = 0L
 
+    private var reader: ContinuousReader? = null
+
     init {
+        var started = false
+        val c = cont
+        if (c != null) {
+            try {
+                reader = ContinuousReader(c.first, c.second, { chunks.put(it) }, { if (running) readError = it })
+                    .also { it.start() }
+                started = true
+                log("Continuous USB reader on.")
+            } catch (e: Exception) {
+                log("Continuous reader unavailable (${e.message}); using the standard one.")
+                reader?.stop(); reader = null
+            }
+        }
+        if (!started) startLegacyReader()
+    }
+
+    private fun startLegacyReader() {
         Thread {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
             val buf = ByteArray(16384)
             try {
                 while (running) {
@@ -89,7 +176,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
     }
 
     /** Stop the reader thread. Call before closing the port. */
-    fun close() { running = false }
+    fun close() { running = false; reader?.stop() }
 
     private fun pump(timeoutMs: Int) {
         val chunk = chunks.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)

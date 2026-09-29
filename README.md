@@ -21,5 +21,8 @@ Push to GitHub; Actions builds a debug APK (Actions -> run -> Artifacts).
 ## USB glitches
 Stub reads are lock-step and MD5-checked. On a short/corrupt block the app resets the chip, reloads the stub and retries; backups read in shrinking pieces.
 
+## Continuous USB reader (experimental)
+Tick box. Keeps 4 bulk-IN requests queued at all times instead of one, so the phone never stops polling the X4 between packets. Aimed at the random dropped bytes seen on stub reads. Off by default.
+
 ## Not done
 X3 / X4 Pro (different layouts), stub-based fast writes, restoring a backup from the app.

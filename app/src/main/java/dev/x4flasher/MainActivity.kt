@@ -5,7 +5,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Bundle
@@ -68,6 +70,20 @@ private suspend fun ensurePermission(ctx: Context, manager: UsbManager, device: 
     }
 }
 
+/** The bulk-IN endpoint the serial driver reads from (asked of the driver, else found by scanning). */
+private fun readEndpointOf(port: UsbSerialPort, device: UsbDevice): UsbEndpoint? {
+    val viaLib = runCatching { port.javaClass.getMethod("getReadEndpoint").invoke(port) as? UsbEndpoint }.getOrNull()
+    if (viaLib != null) return viaLib
+    for (i in 0 until device.interfaceCount) {
+        val itf = device.getInterface(i)
+        for (j in 0 until itf.endpointCount) {
+            val e = itf.getEndpoint(j)
+            if (e.type == UsbConstants.USB_ENDPOINT_XFER_BULK && e.direction == UsbConstants.USB_DIR_IN) return e
+        }
+    }
+    return null
+}
+
 /** Opens the X4's USB port and runs [block] with a loader on it. */
 private suspend fun <T> withLoader(ctx: Context, log: (String) -> Unit, block: (EspRomLoader) -> T): T =
     withContext(Dispatchers.IO) {
@@ -80,7 +96,8 @@ private suspend fun <T> withLoader(ctx: Context, log: (String) -> Unit, block: (
         port.open(conn)
         try {
             port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            val loader = EspRomLoader(port, log)
+            val ep = if (UsbOptions.continuousReader) readEndpointOf(port, driver.device) else null
+            val loader = EspRomLoader(port, log, ep?.let { conn to it })
             try { block(loader) } finally { loader.close() }
         } finally {
             runCatching { port.close() }
@@ -148,6 +165,7 @@ fun FlasherScreen() {
     var fileName by remember { mutableStateOf("") }
     var preflight by remember { mutableStateOf(true) }
     var inactive by remember { mutableStateOf(false) }
+    var continuous by remember { mutableStateOf(UsbOptions.continuousReader) }
     var confirmAction by remember { mutableStateOf<String?>(null) } // "flash" | "swap"
 
     fun log(s: String) { scope.launch(Dispatchers.Main) { logLines.add(s) } }
@@ -202,6 +220,14 @@ fun FlasherScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = inactive, onCheckedChange = { inactive = it }, enabled = !busy)
             Text("Flash into the inactive slot (keep current firmware as fallback)", style = MaterialTheme.typography.bodyMedium)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = continuous,
+                onCheckedChange = { continuous = it; UsbOptions.continuousReader = it },
+                enabled = !busy
+            )
+            Text("Continuous USB reader (experimental, for glitchy reads)", style = MaterialTheme.typography.bodyMedium)
         }
         Button(onClick = { confirmAction = "flash" }, enabled = !busy && image != null) { Text("Flash to X4") }
 
