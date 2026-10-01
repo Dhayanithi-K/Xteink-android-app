@@ -2,6 +2,11 @@
 
 Flashes an app image (e.g. CrossPoint firmware.bin) onto an Xteink X4 from an Android phone
 over USB-C OTG. No PC.
+# X4 Flasher (Android) - built entirely on claude AI
+# Building the first version of this app took only 10 minutes!!!
+## Disclaimer: ⚠️Try at your own risk, Please don't blame me if you bricks your device, blame claude 😂⚠️
+Flashes an app image (e.g. CrossPoint `firmware.bin`) onto an Xteink X4 from an Android phone
+over USB-C OTG. ROM-bootloader only, no stub, no PC.
 
 ## Buttons
 - **Flash to X4**: image -> app0 (0x10000), MD5 verify, blank otadata, reset.
@@ -47,3 +52,20 @@ future update can never be signed to match this install without uninstalling it 
 
 ## Not done
 X3 / X4 Pro (different layouts), stub-based fast writes, restoring a backup from the app.
+## Not done yet
+- Backup of stock firmware (ROM loader can't read flash; needs the esptool stub loader)
+- Partition-table check before writing
+- X3 / X4 Pro (different layouts; deliberately unsupported)
+- Untested on hardware
+
+## How to use?
+- Download the apk from [Release](https://github.com/Dhayanithi-K/Xteink-android-app/releases)
+-  section and install on your android device.
+- Connect your xteink x4 device to your android using usb C to C cable and make sure the xteink x4 is not sleeping.
+- Download the desired firmware.bin file (eg: crosspoint/ inky / Witch(hunt) Reader - basically whichever you like in your android device
+- open the app and select the firmware and wait for it to verify it.
+- click Flash to X4.
+- wait for the xteink x4 device to reboot
+- Done
+## Screenshot
+<img width="1080" height="2400" alt="1000118342" src="https://github.com/user-attachments/assets/1fe17fc7-44d4-479b-a4bb-9fa0d1efe699" />
