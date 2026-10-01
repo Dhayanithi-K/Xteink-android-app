@@ -5,6 +5,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # `if:` conditions can't reference `secrets` directly, so mirror it into env first.
+      HAS_KEYSTORE: ${{ secrets.X4_KEYSTORE_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -28,15 +31,12 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
 
       # Release build only runs if the keystore secret is configured (see README:
-      # "Signed release build"). Until then this step is skipped, not failed.
+      # "Signed release build"). Until then these steps are skipped, not failed.
       - name: Decode keystore
-        id: ks
-        if: ${{ secrets.X4_KEYSTORE_B64 != '' }}
-        run: |
-          echo "${{ secrets.X4_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/x4-release.jks"
-          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+        if: env.HAS_KEYSTORE == 'true'
+        run: echo "${{ secrets.X4_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/x4-release.jks"
       - name: Build signed release APK
-        if: steps.ks.outputs.has_keystore == 'true'
+        if: env.HAS_KEYSTORE == 'true'
         env:
           X4_KEYSTORE_PATH: ${{ runner.temp }}/x4-release.jks
           X4_KEYSTORE_PASSWORD: ${{ secrets.X4_KEYSTORE_PASSWORD }}
@@ -44,7 +44,7 @@ jobs:
           X4_KEY_PASSWORD: ${{ secrets.X4_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon
       - uses: actions/upload-artifact@v4
-        if: steps.ks.outputs.has_keystore == 'true'
+        if: env.HAS_KEYSTORE == 'true'
         with:
           name: x4-flasher-release
           path: app/build/outputs/apk/release/*.apk
