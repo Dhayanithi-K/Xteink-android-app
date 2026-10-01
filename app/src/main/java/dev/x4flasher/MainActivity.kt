@@ -95,7 +95,7 @@ private suspend fun <T> withLoader(ctx: Context, log: (String) -> Unit, block: (
         val port = driver.ports[0]
         port.open(conn)
         try {
-            port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            port.setParameters(921600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)  // matches esptool's default; try if 115200 still glitches
             val ep = if (UsbOptions.continuousReader) readEndpointOf(port, driver.device) else null
             val loader = EspRomLoader(port, log, ep?.let { conn to it })
             try { block(loader) } finally { loader.close() }
