@@ -16,15 +16,27 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.ProbeTable
@@ -37,10 +49,42 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import kotlin.coroutines.resume
 
+// ---------------- Look & feel ----------------
+
+private val Amber = Color(0xFFFFB300)
+private val Teal = Color(0xFF26C6DA)
+private val Violet = Color(0xFF8B5CF6)
+private val Mint = Color(0xFF34D399)
+private val Rose = Color(0xFFF87171)
+private val InkBg = Color(0xFF0E0F1A)
+private val InkSurface = Color(0xFF171926)
+private val InkSurface2 = Color(0xFF1F2233)
+
+private val X4ColorScheme = darkColorScheme(
+    primary = Violet,
+    secondary = Teal,
+    tertiary = Amber,
+    background = InkBg,
+    surface = InkSurface,
+    surfaceVariant = InkSurface2,
+    error = Rose,
+    onPrimary = Color.White,
+    onBackground = Color(0xFFE6E6F0),
+    onSurface = Color(0xFFE6E6F0),
+)
+
+@Composable
+private fun X4Theme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = X4ColorScheme, shapes = Shapes(
+        extraSmall = RoundedCornerShape(8.dp), small = RoundedCornerShape(12.dp),
+        medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(20.dp),
+    ), content = content)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { Surface(Modifier.fillMaxSize()) { FlasherScreen() } } }
+        setContent { X4Theme { Surface(Modifier.fillMaxSize(), color = InkBg) { FlasherScreen() } } }
     }
 }
 
@@ -95,7 +139,7 @@ private suspend fun <T> withLoader(ctx: Context, log: (String) -> Unit, block: (
         val port = driver.ports[0]
         port.open(conn)
         try {
-            port.setParameters(921600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)  // matches esptool's default; try if 115200 still glitches
+            port.setParameters(921600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
             val ep = if (UsbOptions.continuousReader) readEndpointOf(port, driver.device) else null
             val loader = EspRomLoader(port, log, ep?.let { conn to it })
             try { block(loader) } finally { loader.close() }
@@ -154,10 +198,69 @@ private fun displayName(ctx: Context, uri: Uri): String =
         if (i >= 0 && c.moveToFirst()) c.getString(i) else null
     } ?: uri.lastPathSegment ?: "firmware.bin"
 
+// ---------------- Small UI building blocks ----------------
+
+@Composable
+private fun SectionCard(title: String, accent: Color, content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkSurface),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(accent))
+                Text(title, style = MaterialTheme.typography.labelLarge, color = accent)
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun GlowButton(label: String, emoji: String, accent: Color, enabled: Boolean, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black, disabledContainerColor = InkSurface2),
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().height(48.dp),
+    ) { Text("$emoji  $label", style = MaterialTheme.typography.titleSmall) }
+}
+
+@Composable
+private fun GhostButton(label: String, emoji: String, accent: Color, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = accent),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (enabled) accent else Color(0xFF3A3D4F)),
+        shape = MaterialTheme.shapes.small,
+        modifier = modifier,
+    ) { Text("$emoji $label", style = MaterialTheme.typography.labelMedium, maxLines = 1) }
+}
+
+/** Colors each log line by what it reports, so errors and successes pop out of the scrollback. */
+private fun colorize(lines: List<String>): AnnotatedString = buildAnnotatedString {
+    lines.forEachIndexed { i, line ->
+        val color = when {
+            line.startsWith("ERROR") || line.contains("glitch", ignoreCase = true) -> Rose
+            line.startsWith("DIAG") -> Color(0xFF8A8DA0)
+            line.startsWith("Retrying") -> Amber
+            line.contains("Done.") || line.contains("complete") || line.contains("Verified") || line.contains("confirmed") -> Mint
+            line.contains("Switching") || line.contains("Loading") || line.contains("Resetting") -> Teal
+            else -> Color(0xFFD6D7E6)
+        }
+        withStyle(SpanStyle(color = color)) { append(line) }
+        if (i != lines.lastIndex) append("\n")
+    }
+}
+
 @Composable
 fun FlasherScreen() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     val logLines = remember { mutableStateListOf<String>() }
     var progress by remember { mutableFloatStateOf(0f) }
     var busy by remember { mutableStateOf(false) }
@@ -167,6 +270,7 @@ fun FlasherScreen() {
     var inactive by remember { mutableStateOf(false) }
     var continuous by remember { mutableStateOf(UsbOptions.continuousReader) }
     var confirmAction by remember { mutableStateOf<String?>(null) } // "flash" | "swap"
+    var copied by remember { mutableStateOf(false) }
 
     fun log(s: String) { scope.launch(Dispatchers.Main) { logLines.add(s) } }
     fun setProgress(p: Float) { scope.launch(Dispatchers.Main) { progress = p } }
@@ -203,66 +307,148 @@ fun FlasherScreen() {
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("X4 Flasher", style = MaterialTheme.typography.headlineSmall)
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(InkBg)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // ---- Header ----
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(
+                Modifier.size(40.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Brush.linearGradient(listOf(Violet, Teal))),
+                contentAlignment = Alignment.Center
+            ) { Text("⚡", fontSize = 20.sp) }
+            Column {
+                Text("X4 Flasher", style = MaterialTheme.typography.headlineSmall, color = Color.White)
+                Text(
+                    "ESP32-C3 · USB-C OTG",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF9A9CB5)
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = Teal)
+        }
         Text(
-            "Xteink X4 only (ESP32-C3), over USB-C OTG. Keep the X4 awake. " +
-                "Locked units: use the SD-card install instead.",
-            style = MaterialTheme.typography.bodySmall
+            "Keep the X4 awake while connected. Locked units: use the SD-card install instead.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF9A9CB5)
         )
 
-        Button(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose firmware .bin") }
-        if (fileName.isNotEmpty()) Text(fileName, style = MaterialTheme.typography.bodyMedium)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = preflight || inactive, onCheckedChange = { preflight = it }, enabled = !busy && !inactive)
-            Text("Check partition table before flashing", style = MaterialTheme.typography.bodyMedium)
+        // ---- Firmware & flashing ----
+        SectionCard("FIRMWARE", Violet) {
+            GhostButton("Choose firmware .bin", "📂", Violet, !busy, Modifier.fillMaxWidth()) {
+                picker.launch(arrayOf("*/*"))
+            }
+            if (fileName.isNotEmpty()) {
+                Surface(color = InkSurface2, shape = MaterialTheme.shapes.extraSmall) {
+                    Text(
+                        fileName, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.bodySmall, color = Color(0xFFCFCFE6)
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = preflight || inactive, onCheckedChange = { preflight = it },
+                    enabled = !busy && !inactive,
+                    colors = CheckboxDefaults.colors(checkedColor = Violet)
+                )
+                Text("Check partition table before flashing", style = MaterialTheme.typography.bodySmall)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = inactive, onCheckedChange = { inactive = it }, enabled = !busy,
+                    colors = CheckboxDefaults.colors(checkedColor = Violet)
+                )
+                Text("Flash into inactive slot (keep current as fallback)", style = MaterialTheme.typography.bodySmall)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = continuous,
+                    onCheckedChange = { continuous = it; UsbOptions.continuousReader = it },
+                    enabled = !busy,
+                    colors = CheckboxDefaults.colors(checkedColor = Teal)
+                )
+                Text("Continuous USB reader (fixes read glitches — keep on)", style = MaterialTheme.typography.bodySmall)
+            }
+            GlowButton("Flash to X4", "⚡", Violet, !busy && image != null) { confirmAction = "flash" }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = inactive, onCheckedChange = { inactive = it }, enabled = !busy)
-            Text("Flash into the inactive slot (keep current firmware as fallback)", style = MaterialTheme.typography.bodyMedium)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = continuous,
-                onCheckedChange = { continuous = it; UsbOptions.continuousReader = it },
-                enabled = !busy
-            )
-            Text("Continuous USB reader (experimental, for glitchy reads)", style = MaterialTheme.typography.bodyMedium)
-        }
-        Button(onClick = { confirmAction = "flash" }, enabled = !busy && image != null) { Text("Flash to X4") }
 
-        HorizontalDivider()
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(enabled = !busy, onClick = {
-                task {
-                    val stub = stubJson(ctx)
-                    withLoader(ctx, { s -> log(s) }) { loader ->
-                        DeviceOps.inspect(loader, stub) { s -> log(s) }
-                        loader.hardReset()
+        // ---- Device tools ----
+        SectionCard("DEVICE TOOLS", Teal) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                GhostButton("Inspect", "🔍", Teal, !busy, Modifier.weight(1f)) {
+                    task {
+                        val stub = stubJson(ctx)
+                        withLoader(ctx, { s -> log(s) }) { loader ->
+                            DeviceOps.inspect(loader, stub) { s -> log(s) }
+                            loader.hardReset()
+                        }
                     }
                 }
-            }) { Text("Inspect") }
-            OutlinedButton(enabled = !busy, onClick = { backupPicker.launch("x4-full-flash-backup.bin") }) {
-                Text("Back up flash")
+                GhostButton("Backup", "💾", Mint, !busy, Modifier.weight(1f)) {
+                    backupPicker.launch("x4-full-flash-backup.bin")
+                }
+                GhostButton("Swap", "🔁", Amber, !busy, Modifier.weight(1f)) { confirmAction = "swap" }
             }
-            OutlinedButton(enabled = !busy, onClick = { confirmAction = "swap" }) { Text("Swap slot") }
         }
 
-        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Text(logLines.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+        // ---- Progress ----
+        if (busy || progress > 0f) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                color = Teal, trackColor = InkSurface2,
+            )
+        }
+
+        // ---- Log ----
+        SectionCard("LOG", Amber) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(logLines.joinToString("\n")))
+                    copied = true
+                    scope.launch { kotlinx.coroutines.delay(1500); copied = false }
+                }, enabled = logLines.isNotEmpty()) {
+                    Text(if (copied) "✓ Copied" else "📋 Copy logs", color = if (copied) Mint else Teal, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = { logLines.clear() }, enabled = logLines.isNotEmpty() && !busy) {
+                    Text("🗑 Clear", color = Color(0xFF9A9CB5), style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            Surface(
+                color = Color(0xFF0A0B14), shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 420.dp)
+            ) {
+                Box(Modifier.verticalScroll(rememberScrollState()).padding(10.dp)) {
+                    Text(
+                        colorize(logLines),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                    )
+                }
+            }
         }
     }
 
     confirmAction?.let { action ->
         AlertDialog(
             onDismissRequest = { confirmAction = null },
-            title = { Text(if (action == "flash") "Flash to X4?" else "Switch boot slot?") },
+            containerColor = InkSurface,
+            title = { Text(if (action == "flash") "Flash to X4?" else "Switch boot slot?", color = Color.White) },
             text = {
                 Text(
                     if (action == "flash" && inactive) "Writes the firmware into the slot that is NOT running, then boots it. The current firmware stays in the other slot. Don't unplug until it says Done."
                     else if (action == "flash") "Overwrites the app0 slot and resets the boot selector. Don't unplug until it says Done."
-                    else "Points the bootloader at the other firmware slot, if it holds a valid app. Don't unplug until it says Done."
+                    else "Points the bootloader at the other firmware slot, if it holds a valid app. Don't unplug until it says Done.",
+                    color = Color(0xFFCFCFE6)
                 )
             },
             dismissButton = { TextButton(onClick = { confirmAction = null }) { Text("Cancel") } },
@@ -279,7 +465,7 @@ fun FlasherScreen() {
                             }
                         }
                     }
-                }) { Text(if (action == "flash") "Flash" else "Switch") }
+                }) { Text(if (action == "flash") "Flash" else "Switch", color = Violet) }
             }
         )
     }

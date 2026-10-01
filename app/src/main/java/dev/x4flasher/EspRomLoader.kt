@@ -15,7 +15,7 @@ class EspError(msg: String) : Exception(msg)
 
 /** Switches set from the UI. */
 object UsbOptions {
-    @Volatile var continuousReader = false
+    @Volatile var continuousReader = true   // proven to fix the read glitches; default on
 }
 
 /**
