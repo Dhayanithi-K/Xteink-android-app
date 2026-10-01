@@ -24,5 +24,26 @@ Stub reads are lock-step and MD5-checked. On a short/corrupt block the app reset
 ## Continuous USB reader (experimental)
 Tick box. Keeps 4 bulk-IN requests queued at all times instead of one, so the phone never stops polling the X4 between packets. Aimed at the random dropped bytes seen on stub reads. Off by default.
 
+
+## Signed release build (optional)
+
+The Debug APK under Artifacts already installs and runs fine — "release" only matters if you
+want a smaller, non-debuggable build or a permanent download link. To enable it:
+
+1. Add these four **repository secrets** (Settings -> Secrets and variables -> Actions -> New
+   repository secret) using the keystore generated for you:
+   - `X4_KEYSTORE_B64` — the keystore file, base64-encoded (one long line)
+   - `X4_KEYSTORE_PASSWORD`
+   - `X4_KEY_ALIAS` — `x4flasher`
+   - `X4_KEY_PASSWORD` (same as the store password here)
+2. Push again (or re-run the workflow). A `x4-flasher-release` artifact will appear alongside
+   the debug one.
+3. To also get a permanent link instead of an Actions artifact (artifacts expire), push a tag:
+   `git tag v0.2 && git push origin v0.2`. The workflow then attaches the APK to a GitHub
+   Release at Releases on the repo page.
+
+Keep the `.jks` file and its passwords somewhere safe outside the repo — losing them means a
+future update can never be signed to match this install without uninstalling it first.
+
 ## Not done
 X3 / X4 Pro (different layouts), stub-based fast writes, restoring a backup from the app.

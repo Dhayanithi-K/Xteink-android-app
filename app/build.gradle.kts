@@ -20,6 +20,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    // Release signing comes from env vars so the keystore itself never lives in the repo.
+    // Locally: export them yourself. In CI: set them as GitHub secrets (see workflow).
+    val ksFile = System.getenv("X4_KEYSTORE_PATH")
+    if (ksFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(ksFile)
+                storePassword = System.getenv("X4_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("X4_KEY_ALIAS")
+                keyPassword = System.getenv("X4_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (ksFile != null) signingConfig = signingConfigs.getByName("release")
+        }
+    }
 }
 
 dependencies {
