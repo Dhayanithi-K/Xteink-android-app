@@ -1,12 +1,77 @@
 package dev.x4flasher
 
+import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbRequest
+import android.util.Base64
 import com.hoho.android.usbserial.driver.UsbSerialPort
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 
 class EspError(msg: String) : Exception(msg)
+
+/** Switches set from the UI. */
+object UsbOptions {
+    @Volatile var continuousReader = true   // proven to fix the read glitches; default on
+}
+
+/**
+ * Keeps several bulk-IN requests queued at all times (like libusb on a PC), so the host never stops
+ * polling the X4 between packets. Must not be combined with UsbSerialPort.read().
+ */
+@Suppress("DEPRECATION")
+class ContinuousReader(
+    private val conn: UsbDeviceConnection,
+    private val ep: UsbEndpoint,
+    private val sink: (ByteArray) -> Unit,
+    private val onError: (Exception) -> Unit,
+) {
+    private companion object {
+        const val DEPTH = 4
+        const val SIZE = 4096
+    }
+
+    @Volatile private var running = true
+    private val requests = ArrayList<UsbRequest>()
+
+    fun start() {
+        repeat(DEPTH) {
+            val r = UsbRequest()
+            if (!r.initialize(conn, ep)) throw EspError("USB request init failed")
+            val buf = ByteBuffer.allocate(SIZE)
+            r.clientData = buf
+            requests.add(r)
+            if (!r.queue(buf, SIZE)) throw EspError("USB request queue failed")
+        }
+        Thread {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
+            try {
+                while (running) {
+                    val done = conn.requestWait() ?: break
+                    if (!running) break
+                    val buf = done.clientData as ByteBuffer
+                    val n = buf.position()
+                    if (n > 0) sink(buf.array().copyOf(n))
+                    buf.clear()
+                    if (!done.queue(buf, SIZE)) break
+                }
+                if (running) onError(EspError("USB reader stopped unexpectedly."))
+            } catch (e: Exception) {
+                if (running) onError(e)
+            } finally {
+                for (r in requests) runCatching { r.close() }
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    fun stop() {
+        running = false
+        for (r in requests) runCatching { r.cancel() }
+    }
+}
 
 /** Guards so we only ever write a sane ESP32-C3 *app* image into app0. */
 object ImageCheck {
@@ -32,10 +97,18 @@ object ImageCheck {
  * Minimal ESP ROM-bootloader client (no stub): sync, flash write, MD5 verify.
  * The ROM loader cannot read flash back; that needs the stub (future work).
  */
-class EspRomLoader(private val port: UsbSerialPort, private val log: (String) -> Unit) {
+class EspRomLoader(
+    private val port: UsbSerialPort,
+    private val log: (String) -> Unit,
+    private val cont: Pair<UsbDeviceConnection, UsbEndpoint>? = null,
+) {
 
     private companion object {
         const val CMD_FLASH_BEGIN = 0x02
+        const val CMD_MEM_BEGIN = 0x05
+        const val CMD_MEM_END = 0x06
+        const val CMD_MEM_DATA = 0x07
+        const val CMD_READ_FLASH = 0xD2
         const val CMD_FLASH_DATA = 0x03
         const val CMD_FLASH_END = 0x04
         const val CMD_SYNC = 0x08
@@ -45,6 +118,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         const val CMD_SPI_FLASH_MD5 = 0x13
 
         const val BLOCK = 0x400
+        const val READ_BLOCK = 0x200   // small on purpose; see readFlash()
         const val FLASH_TOTAL = 0x1000000
         const val CHIP_MAGIC_ADDR = 0x40001000
         val C3_MAGIC = setOf(0x6921506FL, 0x1B31506FL, 0x4881506FL, 0x4361506FL)
@@ -57,14 +131,65 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
     private val cur = ByteArrayOutputStream()
     private var inFrame = false
     private var esc = false
-    private val rx = ByteArray(4096)
+    // Reads must NOT use short timeouts: Android's bulkTransfer drops bytes when a timed
+    // read expires mid-stream (documented in usb-serial-for-android). So one thread does
+    // blocking reads (timeout 0) and hands chunks to us through a queue.
+    private val chunks = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+    @Volatile private var running = true
+    @Volatile private var readError: Exception? = null
+    @Volatile var rawBytesTotal = 0L
+    @Volatile var frameBytesTotal = 0L
+    @Volatile var c0Total = 0L
+
+    private var reader: ContinuousReader? = null
+
+    init {
+        var started = false
+        val c = cont
+        if (c != null) {
+            try {
+                reader = ContinuousReader(c.first, c.second, { chunks.put(it) }, { if (running) readError = it })
+                    .also { it.start() }
+                started = true
+                log("Continuous USB reader on.")
+            } catch (e: Exception) {
+                log("Continuous reader unavailable (${e.message}); using the standard one.")
+                reader?.stop(); reader = null
+            }
+        }
+        if (!started) startLegacyReader()
+    }
+
+    private fun startLegacyReader() {
+        Thread {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) }
+            val buf = ByteArray(16384)
+            try {
+                while (running) {
+                    val n = port.read(buf, 0)
+                    if (n > 0) chunks.put(buf.copyOf(n))
+                }
+            } catch (e: Exception) {
+                if (running) readError = e
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    /** Stop the reader thread. Call before closing the port. */
+    fun close() { running = false; reader?.stop() }
 
     private fun pump(timeoutMs: Int) {
-        val n = port.read(rx, timeoutMs)
-        for (i in 0 until n) {
-            val b = rx[i].toInt() and 0xFF
+        val chunk = chunks.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        if (chunk == null) {
+            readError?.let { throw EspError("USB read failed: ${it.message}") }
+            return
+        }
+        rawBytesTotal += chunk.size
+        for (v in chunk) {
+            val b = v.toInt() and 0xFF
             if (b == 0xC0) {
-                if (inFrame && cur.size() > 0) frames.addLast(cur.toByteArray())
+                c0Total++
+                if (inFrame && cur.size() > 0) { frames.addLast(cur.toByteArray()); frameBytesTotal += cur.size() }
                 cur.reset(); inFrame = true; esc = false
             } else if (inFrame) {
                 if (esc) {
@@ -84,12 +209,10 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         }
     }
 
-    private fun send(cmd: Int, data: ByteArray, chk: Int) {
-        val pkt = ByteBuffer.allocate(8 + data.size).order(ByteOrder.LITTLE_ENDIAN)
-        pkt.put(0.toByte()).put(cmd.toByte()).putShort(data.size.toShort()).putInt(chk).put(data)
+    private fun slip(payload: ByteArray): ByteArray {
         val out = ByteArrayOutputStream()
         out.write(0xC0)
-        for (b in pkt.array()) {
+        for (b in payload) {
             when (b.toInt() and 0xFF) {
                 0xC0 -> { out.write(0xDB); out.write(0xDC) }
                 0xDB -> { out.write(0xDB); out.write(0xDD) }
@@ -97,7 +220,13 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
             }
         }
         out.write(0xC0)
-        port.write(out.toByteArray(), 5000)
+        return out.toByteArray()
+    }
+
+    private fun send(cmd: Int, data: ByteArray, chk: Int) {
+        val pkt = ByteBuffer.allocate(8 + data.size).order(ByteOrder.LITTLE_ENDIAN)
+        pkt.put(0.toByte()).put(cmd.toByte()).putShort(data.size.toShort()).putInt(chk).put(data)
+        port.write(slip(pkt.array()), 5000)
     }
 
     private fun command(cmd: Int, data: ByteArray = ByteArray(0), chk: Int = 0, timeoutMs: Long = 3000): Resp {
@@ -152,7 +281,7 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
         port.setRTS(false); port.setDTR(false)
         val end = System.currentTimeMillis() + 400   // swallow boot-log noise
         while (System.currentTimeMillis() < end) pump(50)
-        frames.clear()
+        frames.clear(); cur.reset(); inFrame = false; esc = false
     }
 
     fun sync() {
@@ -213,6 +342,81 @@ class EspRomLoader(private val port: UsbSerialPort, private val log: (String) ->
 
     fun finish() {
         try { expectOk(CMD_FLASH_END, le(1)) } catch (_: EspError) { }
+    }
+
+    // ---- Stub loader (RAM) : used only for reading flash ---------------------
+
+    private fun ramUpload(data: ByteArray, addr: Int) {
+        val block = 0x1800
+        val n = (data.size + block - 1) / block
+        expectOk(CMD_MEM_BEGIN, le(data.size, n, block, addr))
+        for (seq in 0 until n) {
+            val chunk = data.copyOfRange(seq * block, minOf(data.size, (seq + 1) * block))
+            var x = 0xEF
+            for (b in chunk) x = x xor (b.toInt() and 0xFF)
+            expectOk(CMD_MEM_DATA, le(chunk.size, seq, 0, 0) + chunk, x)
+        }
+    }
+
+    /** Upload and start esptool's flasher stub (JSON with base64 text/data). */
+    fun loadStub(json: String) {
+        val o = JSONObject(json)
+        val entry = o.getLong("entry").toInt()
+        ramUpload(Base64.decode(o.getString("text"), Base64.DEFAULT), o.getLong("text_start").toInt())
+        if (o.has("data")) {
+            val d = Base64.decode(o.getString("data"), Base64.DEFAULT)
+            if (d.isNotEmpty()) ramUpload(d, o.getLong("data_start").toInt())
+        }
+        expectOk(CMD_MEM_END, le(0, entry))
+        val deadline = System.currentTimeMillis() + 5000
+        var started = false
+        while (!started) {
+            val f = nextFrame(deadline) ?: break
+            started = String(f, Charsets.US_ASCII) == "OHAI"
+        }
+        if (!started) throw EspError("Stub did not start (no OHAI). Retry.")
+        log("Stub running.")
+    }
+
+    /** Stub-only. Streams flash contents to [sink] in blocks, verifies the stub's MD5 of the stream. */
+    fun readFlash(offset: Int, length: Int, sink: (ByteArray) -> Unit, onProgress: (Float) -> Unit) {
+        val block = READ_BLOCK
+        expectOk(CMD_READ_FLASH, le(offset, length, block, 1), 0, 5000)   // small blocks, 1 in flight: lock-step
+        val md = MessageDigest.getInstance("MD5")
+        var got = 0
+        while (got < length) {
+            val f = nextFrame(System.currentTimeMillis() + 10_000)
+                ?: throw EspError("Timeout reading flash at 0x%X".format(offset + got))
+            val expected = minOf(block, length - got)
+            if (f.size != expected) {
+                fun hex(b: ByteArray, n: Int) = b.take(n).joinToString(" ") { "%02x".format(it) }
+                log("DIAG short block: got ${f.size} of $expected at 0x%X".format(offset + got))
+                log("DIAG frame head: ${hex(f, minOf(16, f.size))}  tail: ${hex(f.reversed().toByteArray(), minOf(16, f.size)).let { it.split(" ").reversed().joinToString(" ") }}")
+                log("DIAG counters: rawBytes=$rawBytesTotal frameBytes=$frameBytesTotal c0=$c0Total")
+                var trailing = 0
+                var extra: ByteArray? = null
+                val peekDeadline = System.currentTimeMillis() + 300
+                while (true) {
+                    val nf = nextFrame(peekDeadline) ?: break
+                    trailing++
+                    if (extra == null) extra = nf
+                    log("DIAG trailing frame #$trailing size=${nf.size} head=${hex(nf, minOf(16, nf.size))}")
+                    if (trailing >= 3) break
+                }
+                if (extra != null && f.size + extra.size == expected) {
+                    log("DIAG: short frame + very next frame add up to $expected -> looks like a spurious frame-terminator (0xC0) mid-block, not real byte loss.")
+                } else if (trailing == 0) {
+                    log("DIAG: no data followed within 300ms -> looks like genuine byte loss on the USB link, not a split frame.")
+                }
+                throw EspError("Short block (%d of %d bytes) at 0x%X. Retry.".format(f.size, expected, offset + got))
+            }
+            sink(f); md.update(f); got += f.size
+            port.write(slip(le(got)), 5000)
+            if ((got / block) % 128 == 0) onProgress(got / length.toFloat())
+        }
+        onProgress(1f)
+        val digest = nextFrame(System.currentTimeMillis() + 10_000) ?: throw EspError("No MD5 from stub.")
+        if (!md.digest().contentEquals(digest)) throw EspError("Read MD5 mismatch. Try again.")
     }
 
     fun hardReset() {

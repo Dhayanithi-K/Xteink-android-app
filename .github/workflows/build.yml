@@ -5,17 +5,56 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # `if:` conditions can't reference `secrets` directly, so mirror it into env first.
+      HAS_KEYSTORE: ${{ secrets.X4_KEYSTORE_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+      - name: Fetch ESP32-C3 stub
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fsSL -o app/src/main/assets/esp32c3.json \
+            https://github.com/espressif/esptool-legacy-flasher-stub/releases/download/v1.11.1/esp32c3.json
+          echo "67e45f7ae1cb7f2107f1573e2f5d1e31c490914a6f4c2d841119189d8f379990  app/src/main/assets/esp32c3.json" | sha256sum -c -
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
       - run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: x4-flasher-debug
           path: app/build/outputs/apk/debug/*.apk
+
+      # Release build only runs if the keystore secret is configured (see README:
+      # "Signed release build"). Until then these steps are skipped, not failed.
+      - name: Decode keystore
+        if: env.HAS_KEYSTORE == 'true'
+        run: echo "${{ secrets.X4_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/x4-release.jks"
+      - name: Build signed release APK
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          X4_KEYSTORE_PATH: ${{ runner.temp }}/x4-release.jks
+          X4_KEYSTORE_PASSWORD: ${{ secrets.X4_KEYSTORE_PASSWORD }}
+          X4_KEY_ALIAS: ${{ secrets.X4_KEY_ALIAS }}
+          X4_KEY_PASSWORD: ${{ secrets.X4_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_KEYSTORE == 'true'
+        with:
+          name: x4-flasher-release
+          path: app/build/outputs/apk/release/*.apk
+
+      # On a pushed tag like v0.2, also publish the signed APK (or the debug one, as a
+      # fallback) as a GitHub Release so it has a permanent download link.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
